@@ -1,4 +1,4 @@
-# DeskBuddy 🤖👀
+# DeskBuddy 
 
 A DIY desktop companion robot: a movable head that tracks your movement, dual round-LCD reactive eyes, and a wake-word voice companion powered by cloud AI. Built cheap in India on an ESP32-S3 — no Raspberry Pi needed.
 
