@@ -72,3 +72,4 @@ USB-powered v1 (5V 2A): servos + amp on 5V, logic/eyes/mic on 3.3V rail. Budget 
 ## Changelog
 
 - 2026-09-30: created from research tickets 02/03/04 (tracking, eyes, voice findings).
+- 2026-09-30: repo pushed + issues #1–#6 opened; parts/wiring mirrored from research findings. Update this file on every part arrival, wiring change, or new idea.

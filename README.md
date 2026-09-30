@@ -34,11 +34,11 @@ deskbuddy/
 
 ## Roadmap (issues)
 
-1. Brain + voice architecture — ESP32-S3 vs laptop-assisted split
-2. Tracking: camera vs PIR decision (research done, needs verdict)
-3. Dual round LCD eyes bring-up (research done, needs build)
-4. Cheap voice pipeline build (research done, needs build)
-5. Head mechanics + power + chassis
-6. Behavior spec + build order
+Work them in order — #1 unblocks #2–#5, all unblock #6.
 
-Work them in order — 1 unblocks 2–5, all unblock 6.
+1. [#1 Brain + voice architecture](https://github.com/Jairus-Jinu/deskbuddy/issues/1) — ESP32-S3 vs laptop-assisted split
+2. [#2 Tracking verdict](https://github.com/Jairus-Jinu/deskbuddy/issues/2) — PIR sweep vs webcam + laptop
+3. [#3 Dual round LCD eyes bring-up](https://github.com/Jairus-Jinu/deskbuddy/issues/3)
+4. [#4 Cheap voice pipeline build](https://github.com/Jairus-Jinu/deskbuddy/issues/4)
+5. [#5 Head mechanics + power + chassis](https://github.com/Jairus-Jinu/deskbuddy/issues/5)
+6. [#6 Behavior spec + build order](https://github.com/Jairus-Jinu/deskbuddy/issues/6)
