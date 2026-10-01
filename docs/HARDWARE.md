@@ -74,3 +74,6 @@ USB-powered v1 (5V 2A): servos + amp on 5V, logic/eyes/mic on 3.3V rail. Budget 
 - 2026-09-30: created from research tickets 02/03/04 (tracking, eyes, voice findings).
 - 2026-09-30: repo pushed + issues #1–#6 opened; parts/wiring mirrored from research findings. Update this file on every part arrival, wiring change, or new idea.
 - 2026-09-30: `tools/voice-pipeline/` added — laptop-hosted STT→LLM→TTS prototype (Gemini, uses laptop mic/speaker). No hardware required; the cloud half of the voice path is now testable.
+- 2026-09-30: voice stack switched to **Groq (Whisper STT + LLM) + local Piper TTS** after the Gemini project was denied access (403 on every generation call, key otherwise valid). Rationale: Groq has no project-approval gate and a real free tier; Piper is local, offline and free, which is the cheaper shape for the ESP32 build. All three stages verified live on the laptop.
+  - Groq quirk: `llama-3.3-70b-versatile` is Enterprise-only; `openai/gpt-oss-20b` is the free-tier default. gpt-oss is a *reasoning* model — it bills thinking tokens against `max_tokens`, so the reply call uses `max_tokens=1200` + `reasoning_effort="low"` or it returns empty content.
+  - Piper quirk: `synthesize_wav()` sets WAV sample-width before channels, which Python 3.14 rejects — `piper_tts.py` writes the header from the first audio chunk instead.

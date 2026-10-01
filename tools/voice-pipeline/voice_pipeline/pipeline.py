@@ -8,30 +8,27 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, TextIO
+from typing import TextIO
 
 from .audio import AudioError, is_silent, play_wav, record_wav, temp_wav
-from .brain import Brain
-
-MAX_TURNS_REMEMBERED = 12
-
-
-@dataclass
-class Turn:
-    user: str
-    reply: str
+from .brain import MAX_TURNS_REMEMBERED
+from .providers import Turn
 
 
 @dataclass
 class Conversation:
-    """Holds short-term memory and runs one exchange at a time."""
+    """Holds short-term memory and runs one exchange at a time.
 
-    brain: Brain
+    `brain` is duck-typed: any object with transcribe/reply/speak works, so the
+    provider choice stays out of this module entirely.
+    """
+
+    brain: object
     history: list[Turn] = field(default_factory=list)
 
     def ask(self, user_text: str) -> str:
         """Text-in, text-out turn (used by tests and the text REPL)."""
-        reply = self.brain.reply(user_text, self._context())
+        reply = self.brain.reply(user_text, self.history)
         self.history.append(Turn(user=user_text, reply=reply))
         del self.history[:-MAX_TURNS_REMEMBERED]
         return reply
@@ -52,14 +49,6 @@ class Conversation:
         clip = self.brain.speak(text, temp_wav(".wav"))
         play_wav(clip, output_device=speaker)
         return clip
-
-    def _context(self) -> list[dict[str, str]]:
-        """Flatten remembered turns into the Interactions API content list."""
-        turns: list[dict[str, str]] = []
-        for turn in self.history:
-            turns.append({"type": "text", "text": turn.user})
-            turns.append({"type": "text", "text": turn.reply})
-        return turns
 
 
 def voice_loop(

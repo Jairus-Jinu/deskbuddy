@@ -18,11 +18,15 @@ from pathlib import Path
 from google import genai
 
 from .audio import STT_RATE
+from .providers import Turn
 
 DEFAULT_STT_MODEL = "gemini-3.5-flash"
 DEFAULT_LLM_MODEL = "gemini-flash-latest"
 DEFAULT_TTS_MODEL = "gemini-3.8-flash-lite-tts"
 DEFAULT_TTS_VOICE = "Achird"
+
+# How many past turns to replay into the model. Shared by every provider.
+MAX_TURNS_REMEMBERED = 12
 
 # Keeps replies short enough to stay snappy on an ESP32 speaker and cheap per turn.
 DEFAULT_SYSTEM_PROMPT = (
@@ -100,14 +104,17 @@ class Brain:
             raise BrainError(f"transcribe failed ({self.config.stt_model}): {exc}") from exc
         return self._last_text(interaction).strip()
 
-    def reply(self, user_text: str, history: list[dict[str, str]] | None = None) -> str:
+    def reply(self, user_text: str, history: list[Turn] | None = None) -> str:
         """Text -> assistant text, carrying prior turns for multi-turn memory."""
-        turns = list(history or [])
-        turns.append({"type": "text", "text": user_text})
+        content: list[dict[str, str]] = []
+        for turn in history or []:
+            content.append({"type": "text", "text": turn.user})
+            content.append({"type": "text", "text": turn.reply})
+        content.append({"type": "text", "text": user_text})
         try:
             interaction = self._client.interactions.create(
                 model=self.config.llm_model,
-                input=[{"type": "user_input", "content": turns}],
+                input=[{"type": "user_input", "content": content}],
                 system_instruction=self.config.system_prompt,
             )
         except Exception as exc:

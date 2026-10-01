@@ -1,2 +1,6 @@
+# Default setup: Groq for STT + LLM, Piper for local TTS
+groq>=1.7,<2
+piper-tts>=1.8,<2
+
+# Optional: Gemini fallback provider (DESKBUDDY_PROVIDER=gemini)
 google-genai>=2.25,<3
-python-dotenv>=1.0

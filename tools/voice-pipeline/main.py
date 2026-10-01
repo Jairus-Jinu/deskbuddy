@@ -17,11 +17,9 @@ from pathlib import Path
 
 from voice_pipeline import (
     AudioError,
-    Brain,
-    BrainConfig,
-    BrainError,
     Conversation,
-    play_wav,
+    build_brain,
+    selected_provider,
     voice_loop,
 )
 
@@ -48,6 +46,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seconds", type=float, default=6.0, help="mic capture length per turn")
     parser.add_argument("--mic", default=None, help="capture device (arecord -D / pulse source)")
     parser.add_argument("--speaker", default=None, help="playback device (aplay -D / pulse sink)")
+    parser.add_argument(
+        "--provider",
+        choices=("groq", "gemini"),
+        default=None,
+        help="override DESKBUDDY_PROVIDER for this run",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("doctor", help="check the local setup")
@@ -65,22 +69,35 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def cmd_doctor() -> int:
+def cmd_doctor(provider: str | None = None) -> int:
     import shutil
     import wave
 
-    print("DeskBuddy doctor")
+    name = (provider or selected_provider()).lower()
+    print(f"DeskBuddy doctor — provider: {name}")
     print("-" * 40)
 
     for tool in ("arecord", "aplay", "ffmpeg", "pactl"):
         print(f"  {'ok ' if shutil.which(tool) else 'MISSING'}  {tool}")
 
     try:
-        config = BrainConfig.from_env()
-    except BrainError as exc:
-        print(f"  FAIL {exc}")
+        brain = build_brain(name)
+    except Exception as exc:  # noqa: BLE001 - this command exists to report exactly this
+        print(f"  FAIL provider setup: {exc}")
         return 1
-    print(f"  ok   api key present (llm: {config.llm_model})")
+    brain.close()
+    print("  ok   provider configured and reachable")
+
+    tts_engine = os.environ.get("DESKBUDDY_TTS_ENGINE", "piper").lower()
+    if name == "groq" and tts_engine == "piper":
+        try:
+            from voice_pipeline import PiperTTS
+
+            tts = PiperTTS(os.environ.get("DESKBUDDY_TTS_VOICE", "en_US-lessac-medium"))
+            print(f"  ok   piper voice loaded ({tts.voice_name})")
+        except Exception as exc:  # noqa: BLE001 - reported as a doctor finding
+            print(f"  FAIL piper voice: {exc}")
+            return 1
 
     try:
         from voice_pipeline import is_silent, record_wav
@@ -103,19 +120,22 @@ def cmd_doctor() -> int:
 
 def main(argv: list[str] | None = None) -> int:
     load_dotenv(PROJECT_ROOT / ".env")
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.provider:
+        os.environ["DESKBUDDY_PROVIDER"] = args.provider
 
     if args.command == "doctor":
-        return cmd_doctor()
+        return cmd_doctor(args.provider)
 
     try:
-        config = BrainConfig.from_env()
-    except BrainError as exc:
+        brain = build_brain()
+    except Exception as exc:  # provider config/install problems are user-facing
         print(f"error: {exc}", file=sys.stderr)
-        print("copy .env.example to .env and paste your key", file=sys.stderr)
+        print("see tools/voice-pipeline/README.md for setup", file=sys.stderr)
         return 2
 
-    with Brain(config) as brain:
+    with brain:
         conversation = Conversation(brain=brain)
 
         if args.command == "say":
@@ -144,7 +164,7 @@ def main(argv: list[str] | None = None) -> int:
                     break
                 try:
                     print(f"buddy: {conversation.ask(line)}")
-                except BrainError as exc:
+                except Exception as exc:  # noqa: BLE001 - keep the REPL alive
                     print(f"error: {exc}", file=sys.stderr)
             return 0
 

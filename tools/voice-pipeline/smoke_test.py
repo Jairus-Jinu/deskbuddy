@@ -24,12 +24,12 @@ def check(name: str, condition: bool, detail: str = "") -> None:
 
 
 class FakeBrain:
-    """Stands in for Gemini so the loop can be exercised without a key."""
+    """Stands in for a real provider so the loop can run without a key."""
 
     def __init__(self) -> None:
-        self.calls: list[tuple[str, list[dict[str, str]]]] = []
+        self.calls: list[tuple[str, list]] = []
 
-    def reply(self, text: str, history: list[dict[str, str]] | None = None) -> str:
+    def reply(self, text: str, history=None) -> str:
         self.calls.append((text, list(history or [])))
         return f"echo: {text}"
 
@@ -57,8 +57,8 @@ def main() -> int:
         convo = Conversation(brain=brain)
         check("reply returns text", convo.ask("one") == "echo: one")
         convo.ask("two")
-        check("history reaches the next call", len(brain.calls[1][1]) == 2,
-              f"{len(brain.calls[1][1])} parts")
+        check("history reaches the next call", len(brain.calls[1][1]) == 1,
+              f"{len(brain.calls[1][1])} prior turn(s)")
         check("conversation remembered two turns", len(convo.history) == 2)
     finally:
         clip.unlink(missing_ok=True)
