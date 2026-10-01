@@ -1,2 +1,14 @@
 *.log
 .DS_Store
+
+# secrets
+.env
+**/.env
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.doctor-capture.wav

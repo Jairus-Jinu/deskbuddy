@@ -27,10 +27,27 @@ deskbuddy/
 ├── docs/
 │   ├── HARDWARE.md        # living parts + wiring doc (updated as the build evolves)
 │   └── research/          # sourced findings: tracking, eyes, voice
+├── tools/
+│   └── voice-pipeline/    # laptop-hosted STT -> LLM -> TTS prototype (runs today)
 ├── firmware/              # ESP32-S3 code (coming)
 ├── .scratch/deskbuddy/    # wayfinder map + decision tickets
 └── .gitignore
 ```
+
+## Try it now (no hardware needed)
+
+The voice brain runs on your laptop today — mic in, Gemini, speaker out:
+
+```sh
+cd tools/voice-pipeline
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+cp .env.example .env    # paste a free key from https://aistudio.google.com/apikey
+.venv/bin/python smoke_test.py   # offline checks
+.venv/bin/python main.py doctor  # verify audio + key
+.venv/bin/python main.py voice   # talk to it
+```
+
+See [tools/voice-pipeline/README.md](tools/voice-pipeline/README.md).
 
 ## Roadmap (issues)
 
