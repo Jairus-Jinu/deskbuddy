@@ -23,6 +23,7 @@ A buildable v1 spec for DeskBuddy — movable tracking head + dual round-LCD rea
 - [Dual round LCD eyes](./issues/03-dual-round-lcd-eyes.md): 2× GC9A01 at ₹800–₹1,300/pair, TFT_eSPI Animated_Eyes_2, plain ESP32 suffices for eyes alone.
 - [Cheap voice pipeline](./issues/04-voice-pipeline-cheap.md): INMP441 + MAX98357A easy; wake-word needs ESP32-S3 + PSRAM (~₹1,299); all-Gemini ≈₹0.21–0.27/turn.
 - [DeskBuddy repo + docs pushed]: README, docs/HARDWARE.md, docs/research/ live on GitHub; issues #1–#6 opened with native blocking.
+- [Voice pipeline: laptop half built](./issues/04-voice-pipeline-cheap.md): Groq Whisper STT + Groq LLM + local Piper TTS in tools/voice-pipeline/, verified live. Gemini was replaced after a project-level 403 on all generation; Groq has no such gate. On-device wake-word/mic/speaker half still open (needs hardware).
 
 ## Not yet specified
 
