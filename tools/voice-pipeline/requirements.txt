@@ -1,6 +1,15 @@
-# Default setup: Groq for STT + LLM, Piper for local TTS
+# Default setup: Groq for STT + LLM, Kokoro for local TTS
 groq>=1.7,<2
-piper-tts>=1.8,<2
+kokoro-onnx>=0.4.7,<1
+
+# Hands-free conversation: live audio, endpointing, wake word
+sounddevice>=0.5,<1
+openwakeword>=0.4,<1        # kept only for its Silero VAD model download path
+sherpa-onnx>=2,<3           # keyword spotter (custom wake words, no training)
+onnxruntime>=1.30,<2
 
 # Optional: Gemini fallback provider (DESKBUDDY_PROVIDER=gemini)
 google-genai>=2.25,<3
+
+# Optional: the original Piper voice
+# piper-tts>=1.8,<2

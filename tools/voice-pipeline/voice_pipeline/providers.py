@@ -21,6 +21,15 @@ class Turn:
 
 
 @runtime_checkable
+class SttFromAudio(Protocol):
+    """Optional extra: transcribe an in-memory WAV, no temp file needed."""
+
+    def transcribe_audio(self, wav_bytes: bytes, filename: str = "speech.wav") -> str:
+        """WAV bytes -> transcript."""
+        ...
+
+
+@runtime_checkable
 class SpeechToText(Protocol):
     def transcribe(self, wav_path: Path) -> str:
         """Audio file -> transcript."""
@@ -31,6 +40,19 @@ class SpeechToText(Protocol):
 class LanguageModel(Protocol):
     def reply(self, user_text: str, history: list[Turn] | None = None) -> str:
         """User text + prior turns -> assistant text."""
+        ...
+
+
+@runtime_checkable
+class StreamingLanguageModel(Protocol):
+    """Optional extra: the same reply, produced incrementally.
+
+    Lets the first sentence reach the speaker while the rest is still being
+    generated — the single biggest latency win in a spoken conversation.
+    """
+
+    def stream(self, user_text: str, history: list[Turn] | None = None):
+        """Yield assistant text chunks."""
         ...
 
 
