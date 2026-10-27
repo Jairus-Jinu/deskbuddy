@@ -123,10 +123,14 @@ class FakeSpeaker:
 
     def __init__(self) -> None:
         self.played = 0
+        self.cancelled = False
 
     def play(self, samples, on_chunk=None) -> bool:
         self.played += 1
         return True
+
+    def cancel(self) -> None:
+        self.cancelled = True
 
 
 def make_session(brain=None, settings=None) -> ConversationSession:
@@ -271,6 +275,57 @@ def test_settings_defaults() -> None:
     check("sane silence window", 400 <= settings.silence_ms <= 1500, str(settings.silence_ms))
 
 
+def test_service_unit() -> None:
+    print("login service:")
+    import pathlib
+
+    from voice_pipeline import service
+
+    unit = service.render_unit("/usr/bin/python3", pathlib.Path("/opt/deskbuddy/main.py"))
+    check("starts with the graphical session", "WantedBy=graphical-session.target" in unit)
+    check("starts after the display exists", "After=graphical-session.target" in unit)
+    check("runs `serve`", "/opt/deskbuddy/main.py serve" in unit)
+    check("restarts if it dies", "Restart=on-failure" in unit)
+    check("runs from the project so .env is found", "WorkingDirectory=/opt/deskbuddy" in unit)
+
+    lock = service.ServiceLock(pathlib.Path("/tmp") / f"deskbuddy-test-{__import__('os').getpid()}.lock")
+    check("first instance takes the lock", lock.acquire())
+    second = service.ServiceLock(lock.path)
+    check("a second instance is refused", not second.acquire())
+    lock.release()
+    check("the lock frees on release", second.acquire())
+    second.release()
+    lock.path.unlink(missing_ok=True)
+
+
+def test_dismiss() -> None:
+    print("dismissing the window:")
+    import time
+
+    session = make_session()
+    session.expires_at = time.monotonic() + 30
+    session.dismiss()
+    check("ends the open conversation", session._dismissed and session.expires_at == 0.0)
+    check("stops a blocking record", session._should_halt())
+    check("leaves the service running", not session._stop)
+    check("cuts off any reply being spoken", session.speaker.cancelled)
+    # The loop clears the flag so the next wake word works normally.
+    session._dismissed = False
+    session.expires_at = time.monotonic() + 30
+    check("the next session opens again", not session._should_halt())
+
+
+def test_interrupted_reply() -> None:
+    print("interrupting a reply:")
+    session = make_session()
+    session._interrupted = True
+    check("later sentences are not spoken", session._speak_text("second sentence here") is False)
+    check("nothing was synthesised", session.brain.tts.spoken == [], str(session.brain.tts.spoken))
+    session._interrupted = False
+    check("a fresh reply speaks again", session._speak_text("hello there friend") is True)
+    check("that one was synthesised", session.brain.tts.spoken[-1] == "hello there friend")
+
+
 def main() -> int:
     for test in (
         test_split_sentences,
@@ -281,6 +336,9 @@ def main() -> int:
         test_reply_streams_sentences,
         test_handle_turn,
         test_turn_detector,
+        test_dismiss,
+        test_interrupted_reply,
+        test_service_unit,
     ):
         test()
     print()

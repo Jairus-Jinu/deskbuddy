@@ -120,6 +120,8 @@ class ConversationSession:
     feed: object = field(default_factory=ui.NullFeed)
     expires_at: float = field(default=0.0, init=False)
     _stop: bool = field(default=False, init=False)
+    _dismissed: bool = field(default=False, init=False)
+    _interrupted: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
         import sys
@@ -167,6 +169,7 @@ class ConversationSession:
 
     def reply(self, text: str) -> str:
         """Ask the brain and speak the answer sentence by sentence."""
+        self._interrupted = False
         stream = getattr(self.brain, "stream", None)
         if stream is None:
             answer = self.brain.reply(text, self.history)
@@ -196,9 +199,16 @@ class ConversationSession:
         return answer
 
     def _speak_text(self, text: str) -> bool:
-        """Speak one sentence. Returns False if it was interrupted."""
+        """Speak one sentence. Returns False if it was interrupted.
+
+        Once a reply has been cut off, the rest of it is consumed silently:
+        the model keeps writing so the history stays honest, but nothing more
+        is played.
+        """
         if not text.strip():
             return True
+        if self._interrupted or self._dismissed:
+            return False
         tts = getattr(self.brain, "tts", None)
         if tts is None:
             return True
@@ -210,6 +220,8 @@ class ConversationSession:
         if rate != self.speaker.rate:
             samples = _resample(np, samples, rate, self.speaker.rate)
         ok = self.speaker.play(samples, on_chunk=probe)
+        if not ok:
+            self._interrupted = True
         self.mic.flush()  # whatever the mic heard during playback is not ours
         time.sleep(self.settings.echo_guard)
         self.mic.flush()
@@ -247,9 +259,15 @@ class ConversationSession:
                     if not self._await_wake_word():
                         break
                 pcm = self.recorder.record(
-                    deadline=self._turn_deadline(), should_stop=lambda: self._stop
+                    deadline=self._turn_deadline(), should_stop=self._should_halt
                 )
                 if pcm is None:
+                    if self._dismissed:
+                        # The window was dismissed: close the conversation and
+                        # go back to waiting for the wake word.
+                        self._dismissed = False
+                        self.expires_at = 0.0
+                        self.mic.flush()
                     continue
                 if not pcm or len(pcm) < 1600:  # < 50 ms of audio
                     continue
@@ -266,6 +284,20 @@ class ConversationSession:
     def stop(self) -> None:
         """Ask the loop to finish. Used when the widget window is closed."""
         self._stop = True
+
+    def dismiss(self) -> None:
+        """Close the conversation but keep listening for the wake word.
+
+        This is what Escape does in the background service: the window goes
+        away, any reply in progress is cut off, and the next thing said has to
+        start with "choom" again — without restarting the service.
+        """
+        self._dismissed = True
+        self.expires_at = 0.0
+        self.speaker.cancel()
+
+    def _should_halt(self) -> bool:
+        return self._stop or self._dismissed
 
     def _conversation_open(self) -> bool:
         if not self.settings.require_wake_word:
@@ -287,6 +319,9 @@ class ConversationSession:
         self._sleep()
         while not self._stop:
             if self._wake.wait(self.mic, timeout=1.0):
+                # A dismissal from the previous session ends here: this is a
+                # new one, and it must not inherit the halt flag.
+                self._dismissed = False
                 self._say("   (heard the wake word)")
                 self.feed.publish(ui.LISTENING, text="", detail="")
                 self.mic.flush()
@@ -315,7 +350,8 @@ class ConversationSession:
             self._warn(f"   ! reply failed: {exc}")
             self.feed.publish(ui.ERROR, detail=f"reply failed: {exc}")
         # Refresh the open session: the person is still here and talking.
-        self.expires_at = time.monotonic() + self.settings.session_timeout
+        if not self._dismissed:
+            self.expires_at = time.monotonic() + self.settings.session_timeout
         return transcript
 
 
@@ -338,12 +374,17 @@ def converse(
     speaker: str | int | None = None,
     settings: ConversationSettings | None = None,
     widget: bool = False,
+    daemon: bool = False,
 ) -> int:
     """Build the devices and run one hands-free session.
 
     With `widget=True` the face window is driven from this process: the loop
     runs on a worker thread and Tk keeps the main thread, which is what Tk
     requires on Linux.
+
+    With `daemon=True` the window also stays hidden until the wake word is
+    heard, and Escape dismisses the conversation instead of quitting — the
+    process is meant to run from login to shutdown under systemd.
     """
     settings = settings or ConversationSettings()
     try:
@@ -354,6 +395,7 @@ def converse(
         return 2
 
     feed = ui.StateFeed() if widget else ui.NullFeed()
+    auto_hide = widget and daemon
 
     with mic_device, speaker_device:
         session = ConversationSession(
@@ -395,7 +437,10 @@ def converse(
             session.stop()
             mic_device.close()
 
-        window = Widget(feed, on_close=stop)
+        def dismiss() -> None:
+            session.dismiss()
+
+        window = Widget(feed, on_close=stop, on_dismiss=dismiss, auto_hide=auto_hide)
         try:
             window.root.mainloop()
         except tk.TclError:

@@ -8,6 +8,8 @@
     python main.py chat                # typed back-and-forth, keeps memory
     python main.py converse            # the real thing: hands-free conversation
     python main.py converse --widget   # same, with a floating face window
+    python main.py serve               # background service: hidden until "choom"
+    python main.py service --install   # start `serve` automatically at login
     python main.py widget --demo       # preview every state, no mic or key
     python main.py voice               # legacy push-to-talk loop (Enter per turn)
 """
@@ -47,6 +49,24 @@ def load_dotenv(path: Path) -> None:
             os.environ[key] = value
 
 
+def _converse_flags() -> dict[str, dict]:
+    """Options shared by `converse` and `serve`, so the two cannot drift."""
+    return {
+        "--wake-word": dict(default=os.environ.get("DESKBUDDY_WAKE_WORD", "choom"),
+                            help="phrase to say to start talking (default: choom)"),
+        "--no-wake-word": dict(action="store_true", help="always listen, no trigger phrase"),
+        "--silence-ms": dict(type=int, default=800, help="pause length that ends your turn"),
+        "--session-timeout": dict(type=float, default=45.0,
+                                  help="quiet seconds before the wake word is needed again"),
+        "--barge-in": dict(action="store_true", help="let you talk over a reply to cut it off"),
+        "--max-turns": dict(type=int, default=None, help="stop after N answered turns"),
+        "--min-snr": dict(type=float, default=9.0,
+                          help="near-field gate: how far above room noise a voice must be (dB)"),
+        "--near-field": dict(action="store_true",
+                             help="only answer voices louder than the room (unreliable in a loud room)"),
+    }
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="deskbuddy", description="DeskBuddy voice pipeline")
     parser.add_argument("--seconds", type=float, default=6.0, help="mic capture length per turn (legacy `voice`)")
@@ -65,19 +85,20 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("chat", help="typed conversation that remembers context")
 
     conv = sub.add_parser("converse", help="hands-free conversation (wake word, then just talk)")
-    conv.add_argument("--wake-word", default=os.environ.get("DESKBUDDY_WAKE_WORD", "choom"),
-                      help="phrase to say to start talking (default: choom)")
-    conv.add_argument("--no-wake-word", action="store_true", help="always listen, no trigger phrase")
-    conv.add_argument("--silence-ms", type=int, default=800, help="pause length that ends your turn")
-    conv.add_argument("--session-timeout", type=float, default=45.0, help="quiet seconds before the wake word is needed again")
-    conv.add_argument("--barge-in", action="store_true", help="let you talk over a reply to cut it off")
-    conv.add_argument("--max-turns", type=int, default=None, help="stop after N answered turns")
-    conv.add_argument("--min-snr", type=float, default=9.0,
-                      help="near-field gate: how far above room noise a voice must be (dB)")
-    conv.add_argument("--near-field", action="store_true",
-                      help="only answer voices louder than the room (unreliable in a loud room)")
+    for flag, kwargs in _converse_flags().items():
+        conv.add_argument(flag, **kwargs)
     conv.add_argument("--widget", action="store_true",
                       help="show the floating face window while listening")
+
+    serve = sub.add_parser("serve", help="run in the background; the window appears when you say the wake word")
+    for flag, kwargs in _converse_flags().items():
+        serve.add_argument(flag, **kwargs)
+
+    svc = sub.add_parser("service", help="install/uninstall the login service for `serve`")
+    svc.add_argument("--install", action="store_true", help="start with the desktop session")
+    svc.add_argument("--uninstall", action="store_true", help="stop starting with the session")
+    svc.add_argument("--status", action="store_true", help="is it running?")
+    svc.add_argument("--show", action="store_true", help="print the systemd unit without writing it")
 
     face = sub.add_parser("widget", help="show the face window on its own")
     face.add_argument("--demo", action="store_true", help="cycle through every state (no mic needed)")
@@ -93,6 +114,78 @@ def build_parser() -> argparse.ArgumentParser:
     voice.add_argument("--rounds", type=int, default=None, help="stop after N turns")
 
     return parser
+
+
+def _settings_from(args) -> ConversationSettings:  # noqa: ANN001
+    return ConversationSettings(
+        wake_word=args.wake_word,
+        require_wake_word=not args.no_wake_word,
+        silence_ms=args.silence_ms,
+        session_timeout=args.session_timeout,
+        barge_in=args.barge_in,
+        max_turns=args.max_turns,
+        min_snr_db=args.min_snr,
+        near_field=args.near_field,
+    )
+
+
+def cmd_serve(args) -> int:  # noqa: ANN001
+    """Background mode: hidden window, pops up when the wake word is heard."""
+    if not _have_display():
+        print("error: serve needs a desktop session (no DISPLAY/WAYLAND_DISPLAY).",
+              file=sys.stderr)
+        print("       without a screen, use `main.py converse` instead.", file=sys.stderr)
+        return 2
+
+    from voice_pipeline.service import ServiceLock
+
+    lock = ServiceLock()
+    if not lock.acquire():
+        print("DeskBuddy is already running (another process holds the microphone).",
+              file=sys.stderr)
+        print("  stop it:  systemctl --user stop deskbuddy", file=sys.stderr)
+        return 1
+
+    try:
+        brain = build_brain()
+    except Exception as exc:  # provider config/install problems are user-facing
+        lock.release()
+        print(f"error: {exc}", file=sys.stderr)
+        print("see tools/voice-pipeline/README.md for setup", file=sys.stderr)
+        return 2
+
+    print("DeskBuddy is running in the background — say “choom”.", flush=True)
+    try:
+        with brain:
+            return converse(
+                brain,
+                mic=args.mic,
+                speaker=args.speaker,
+                settings=_settings_from(args),
+                out=sys.stdout,
+                err=sys.stderr,
+                widget=True,
+                daemon=True,
+            )
+    finally:
+        lock.release()
+
+
+def _have_display() -> bool:
+    return bool(os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY"))
+
+
+def cmd_service(action: str) -> int:
+    from voice_pipeline import service
+
+    if action == "show":
+        print(service.render_unit(sys.executable, PROJECT_ROOT / "main.py"))
+        return 0
+    if action == "uninstall":
+        return service.uninstall()
+    if action == "status":
+        return service.status()
+    return service.install(sys.executable, PROJECT_ROOT / "main.py")
 
 
 def cmd_widget(demo: bool = False, hold: float = 2.5) -> int:
@@ -268,6 +361,12 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_widget(demo=args.demo, hold=args.hold)
     if args.command == "doctor":
         return cmd_doctor(args.provider)
+    if args.command == "service":
+        action = ("uninstall" if args.uninstall else "status" if args.status
+                  else "show" if args.show else "install")
+        return cmd_service(action)
+    if args.command == "serve":
+        return cmd_serve(args)
 
     try:
         brain = build_brain()
@@ -310,21 +409,11 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if args.command == "converse":
-            settings = ConversationSettings(
-                wake_word=args.wake_word,
-                require_wake_word=not args.no_wake_word,
-                silence_ms=args.silence_ms,
-                session_timeout=args.session_timeout,
-                barge_in=args.barge_in,
-                max_turns=args.max_turns,
-                min_snr_db=args.min_snr,
-                near_field=args.near_field,
-            )
             return converse(
                 brain,
                 mic=args.mic,
                 speaker=args.speaker,
-                settings=settings,
+                settings=_settings_from(args),
                 out=sys.stdout,
                 err=sys.stderr,
                 widget=args.widget,

@@ -3,6 +3,9 @@
 The brain half of DeskBuddy, running on your laptop today instead of an ESP32.
 Say **"choom"** and then just talk — no key press, no fixed recording window:
 
+It runs as a login service, so after you log in there is nothing to start: say
+**"choom"** at any time and a small window pops up; talk, and it answers.
+
 ```
          "choom" ──▶ wake word ──▶ conversation stays open until it goes quiet
                                         │
@@ -42,6 +45,30 @@ Models download on first use and are cached under `~/.cache/deskbuddy/`:
 | `silero_vad.onnx` | 2.3 MB | speech detection |
 | vosk small en-us | ~68 MB | the "choom" wake word |
 
+## Always on
+
+```sh
+.venv/bin/python main.py service --install    # start with the desktop session
+.venv/bin/python main.py service --status     # is it running?
+.venv/bin/python main.py service --uninstall  # stop starting with the session
+```
+
+That writes `~/.config/systemd/user/deskbuddy.service`, bound to
+`graphical-session.target`, and starts it now — no logout needed, and it comes
+back on its own after a reboot. Nothing is on screen while it waits; say
+"choom" and the window appears, click it (or press Esc) to dismiss it, and it
+fades away by itself a few seconds after the conversation goes quiet.
+
+```sh
+journalctl --user -u deskbuddy -f     # what it is hearing
+```
+
+Only one copy can run at a time — `serve` takes a lock, so a second instance
+refuses to start rather than opening a second microphone. In the service, stop
+and start are `systemctl --user stop|start deskbuddy`.
+
+`serve` needs a graphical session. On a headless machine use `converse`.
+
 ## Use
 
 ```sh
@@ -49,7 +76,8 @@ Models download on first use and are cached under `~/.cache/deskbuddy/`:
 .venv/bin/python main.py devices         # list audio devices
 .venv/bin/python test_conversation.py    # offline checks, no mic, no key
 
-.venv/bin/python main.py converse        # hands-free: say "choom", then talk
+.venv/bin/python main.py converse        # hands-free in this terminal: say "choom", then talk
+.venv/bin/python main.py serve           # same, as the background service (window hidden until "choom")
 .venv/bin/python main.py say "hello there"
 .venv/bin/python main.py ask "what's the plan today?"
 .venv/bin/python main.py chat            # typed conversation, remembers context
@@ -154,11 +182,13 @@ first-sentence head start.
 
 | File | Role |
 |---|---|
-| `main.py` | CLI: doctor / devices / say / ask / chat / converse / voice |
+| `main.py` | CLI: doctor / devices / say / ask / chat / converse / serve / service / voice |
+| `voice_pipeline/service.py` | the systemd user unit, install/uninstall, single-instance lock |
+| `voice_pipeline/widget.py` | the pop-up window (hidden until the wake word) |
 | `voice_pipeline/conversation.py` | the hands-free loop: wake word, turns, sentence streaming |
 | `voice_pipeline/audio_io.py` | live mic + speaker streams (sounddevice) |
 | `voice_pipeline/vad.py` | Silero VAD wrapper and turn detector |
-| `voice_pipeline/wake_word.py` | sherpa-onnx keyword spotter, model download |
+| `voice_pipeline/wake_word.py` | Vosk wake word ("choom"), model download |
 | `voice_pipeline/kokoro_tts.py` | local Kokoro voice |
 | `voice_pipeline/level.py` | noise floor + optional near-field gate |
 | `voice_pipeline/groq_brain.py` | Groq STT + streaming LLM |
