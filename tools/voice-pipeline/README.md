@@ -21,8 +21,9 @@ Say **"choom"** and then just talk — no key press, no fixed recording window:
   is still writing the second.
 - **Silero VAD** (2.3 MB ONNX, run directly — no PyTorch) decides when you
   started and stopped talking.
-- **sherpa-onnx** keyword spotter for the wake word: a 10 MB model where a new
-  phrase is a line of phonemes, not a training run.
+- **Vosk** for the wake word: a small model whose decoder is locked to a few
+  words. "choom" is not in its vocabulary, but it already hears the word as
+  "chum"/"choon", so those are the grammar entries.
 
 ## Setup
 
@@ -39,7 +40,7 @@ Models download on first use and are cached under `~/.cache/deskbuddy/`:
 |---|---|---|
 | `kokoro-v1.0.onnx` + voices | ~340 MB | speech output |
 | `silero_vad.onnx` | 2.3 MB | speech detection |
-| zipformer kws (int8) | ~10 MB | the "choom" wake word |
+| vosk small en-us | ~68 MB | the "choom" wake word |
 
 ## Use
 
@@ -69,18 +70,35 @@ Models download on first use and are cached under `~/.cache/deskbuddy/`:
 
 ## The wake word
 
-`choom` is not a stock wake word. openWakeWord only ships a fixed list (alexa,
-hey jarvis, hey mycroft, timer, weather) and a custom word needs a training run
-against tens of thousands of clips. sherpa-onnx's keyword spotter instead
-constrains a tiny ASR decoder to a phrase you spell in CMU phonemes:
+`choom` is not a stock wake word, and the two obvious engines were measured
+and rejected:
 
-```
-CH UW1 M @CHOOM
+- **openWakeWord** ships only alexa / hey jarvis / hey mycroft / timer /
+  weather. A custom word needs a training run against thousands of clips.
+- **sherpa-onnx's keyword spotter** can spell any word in phonemes, so it
+  looked ideal — but on identical clean audio it only detected the word 4
+  times out of 6 depending on how much silence came before it, and never with
+  classroom noise behind it.
+
+Vosk runs a small ASR model with its decoder restricted to a word list. The
+catch: "choom" is not in its vocabulary and unknown words are silently
+dropped. It already hears the word as **"chum"/"choon"**, so those are the
+grammar entries (`HOMOPHONES` in `wake_word.py`).
+
+To use a different word, add the near-miss spellings the recognizer produces:
+
+```sh
+.venv/bin/python test_choom.py --what-heard   # prints what it thinks you said
 ```
 
-To use a different word, find its phonemes (any CMU dictionary — `cmudict`
-online works) and pass `--wake-word`. The shipped vocabulary covers English
-phonemes; that is why arbitrary words work without retraining.
+## Test the wake word on its own
+
+```sh
+.venv/bin/python test_choom.py
+```
+
+This prints a live mic bar and what the recognizer hears, so a near-miss is
+visible instead of silent. It uses the same detector as `converse`.
 
 ## Working in a noisy room
 
@@ -98,7 +116,18 @@ laptop speaker only reached ~5 dB at normal volume. Any threshold that rejects
 the room also rejects the person at the desk. The gate remains available
 (`--near-field --min-snr N`) for genuinely quiet rooms.
 
-**What actually matters:** how loud you are relative to everyone else at the
+**Microphone gain was the real bug.** This laptop's mic was at 81% gain and
+clipping at full scale on ordinary room sound — 7.5% of samples pinned at the
+maximum. Clipped speech is not loud speech, it is *unintelligible*: every peak
+flattens to the same value, so the recognizer hears mush. `doctor` now detects
+sustained clipping and tells you the fix. If the wake word stops working, check
+this first:
+
+```sh
+pactl set-source-volume @DEFAULT_SOURCE@ 25%
+```
+
+**What also matters:** how loud you are relative to everyone else at the
 microphone. Sitting close to the laptop and speaking normally gives a much
 better signal-to-noise ratio than any software setting. If false triggers do
 become a problem, raise the keyword threshold in `wake_word.py`

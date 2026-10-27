@@ -62,11 +62,17 @@ class MicLevel:
 class Microphone:
     """A never-closing capture stream with a droppable frame queue.
 
+    `close()` marks the device closed, so any thread parked in `read()` wakes
+    up instead of waiting out its timeout — this is what makes closing the
+    window exit promptly rather than after the next blocking call.
+
     Frames are int16 mono at 16 kHz. The queue is bounded: if the consumer
     stalls we drop the oldest audio rather than growing without limit, which is
     the right trade-off when the goal is "what did they just say" rather than
     "transcribe the whole session".
     """
+
+    closed: bool = False
 
     def __init__(self, device: str | int | None = None, max_frames: int = 400) -> None:
         try:
@@ -75,6 +81,7 @@ class Microphone:
             raise AudioDeviceError("sounddevice is not installed (pip install sounddevice)") from exc
 
         self._sd = sd
+        self.closed = False
         self._queue: queue.Queue[bytes] = queue.Queue(maxsize=max_frames)
         self._device = _resolve_device(device, "input")
         try:
@@ -108,6 +115,12 @@ class Microphone:
         self._stream.stop()
 
     def close(self) -> None:
+        self.closed = True
+        # Unblock anyone waiting in read().
+        try:
+            self._queue.put_nowait(b"")
+        except queue.Full:
+            pass
         self._stream.close()
 
     def __enter__(self) -> "Microphone":
@@ -119,9 +132,10 @@ class Microphone:
     def read(self, timeout: float = 1.0) -> bytes | None:
         """Next chunk of PCM, or None if nothing arrived within `timeout`."""
         try:
-            return self._queue.get(timeout=timeout)
+            chunk = self._queue.get(timeout=timeout)
         except queue.Empty:
             return None
+        return chunk or None
 
     def read_samples(self, count: int, timeout: float = 1.0) -> bytes | None:
         """Exactly `count` samples (2 bytes each), or None on timeout."""

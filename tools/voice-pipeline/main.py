@@ -7,6 +7,8 @@
     python main.py ask "what's up"     # text -> reply text
     python main.py chat                # typed back-and-forth, keeps memory
     python main.py converse            # the real thing: hands-free conversation
+    python main.py converse --widget   # same, with a floating face window
+    python main.py widget --demo       # preview every state, no mic or key
     python main.py voice               # legacy push-to-talk loop (Enter per turn)
 """
 
@@ -74,6 +76,12 @@ def build_parser() -> argparse.ArgumentParser:
                       help="near-field gate: how far above room noise a voice must be (dB)")
     conv.add_argument("--near-field", action="store_true",
                       help="only answer voices louder than the room (unreliable in a loud room)")
+    conv.add_argument("--widget", action="store_true",
+                      help="show the floating face window while listening")
+
+    face = sub.add_parser("widget", help="show the face window on its own")
+    face.add_argument("--demo", action="store_true", help="cycle through every state (no mic needed)")
+    face.add_argument("--hold", type=float, default=2.5, help="seconds per state in --demo")
 
     say = sub.add_parser("say", help="speak the given text")
     say.add_argument("text", nargs="+")
@@ -85,6 +93,25 @@ def build_parser() -> argparse.ArgumentParser:
     voice.add_argument("--rounds", type=int, default=None, help="stop after N turns")
 
     return parser
+
+
+def cmd_widget(demo: bool = False, hold: float = 2.5) -> int:
+    """Run just the face window — useful for styling without speaking."""
+    try:
+        import tkinter  # noqa: F401
+    except ImportError:
+        print("error: tkinter is not available in this Python", file=sys.stderr)
+        return 2
+
+    from voice_pipeline.state import DemoFeed, StateFeed
+    from voice_pipeline.widget import show
+
+    feed = DemoFeed(hold=hold) if demo else StateFeed()
+    if not demo:
+        print("no feed attached — the window will sit in its sleeping state.")
+        print("run `main.py converse --widget` for a live one.")
+    show(feed)
+    return 0
 
 
 def cmd_devices() -> int:
@@ -164,19 +191,28 @@ def cmd_doctor(provider: str | None = None) -> int:
 
     try:
         from voice_pipeline import Microphone, Speaker
+        from voice_pipeline.vad import ClippingGuard
 
+        guard = ClippingGuard()
+        clipped = False
+        peak = 0
         with Microphone() as mic:
-            peak = 0
             started = time.monotonic()
-            while time.monotonic() - started < 2.0:
+            while time.monotonic() - started < 2.5:
                 chunk = mic.read(timeout=0.2)
                 if chunk:
                     peak = max(peak, _peak(chunk))
+                    clipped = guard(chunk) or clipped
         if peak == 0:
             print("  FAIL microphone: 2 s of pure digital silence — the mic (or its mute "
                   "switch) is off. Run `pactl set-source-mute @DEFAULT_SOURCE@ 0`.")
             return 1
-        print(f"  ok   microphone capture (16 kHz mono, peak {peak})")
+        if clipped:
+            print("  FAIL microphone: input is clipping (peaks pinned at full scale). "
+                  "Speech will be distorted and the wake word will not fire.")
+            print("       Fix: pactl set-source-volume @DEFAULT_SOURCE@ 25%")
+            return 1
+        print(f"  ok   microphone capture (16 kHz mono, peak {peak}, no clipping)")
     except Exception as exc:  # noqa: BLE001 - reported as a doctor finding
         print(f"  FAIL microphone: {exc}")
         return 1
@@ -209,7 +245,7 @@ def _check_wake_word() -> str:
     from voice_pipeline import WakeWord
 
     detector = WakeWord()
-    return f"'{detector.name}' (sherpa-onnx)"
+    return f"'{detector.name}' (vosk)"
 
 
 def _check_vad() -> str:
@@ -228,6 +264,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "devices":
         return cmd_devices()
+    if args.command == "widget":
+        return cmd_widget(demo=args.demo, hold=args.hold)
     if args.command == "doctor":
         return cmd_doctor(args.provider)
 
@@ -289,6 +327,7 @@ def main(argv: list[str] | None = None) -> int:
                 settings=settings,
                 out=sys.stdout,
                 err=sys.stderr,
+                widget=args.widget,
             )
 
         if args.command == "voice":

@@ -31,6 +31,7 @@ from .audio_io import MIC_RATE, AudioDeviceError, Microphone, Speaker
 from .brain import MAX_TURNS_REMEMBERED
 from .level import NearFieldGate
 from .providers import Turn
+from . import state as ui
 from .vad import SileroVad, TurnDetector, UtteranceRecorder
 
 # A sentence boundary is [.!?…] followed by whitespace — but "Dr. Smith" and
@@ -116,7 +117,9 @@ class ConversationSession:
     history: list[Turn] = field(default_factory=list)
     out: TextIO = None  # type: ignore[assignment]
     err: TextIO = None  # type: ignore[assignment]
+    feed: object = field(default_factory=ui.NullFeed)
     expires_at: float = field(default=0.0, init=False)
+    _stop: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
         import sys
@@ -129,11 +132,19 @@ class ConversationSession:
         )
         self.gate = gate
         self.recorder = UtteranceRecorder(self.mic, self.detector)
+        self.recorder.on_frame = self._on_mic_frame
         self._wake = None
         if self.settings.require_wake_word:
             from .wake_word import WakeWord
 
             self._wake = WakeWord(name=self.settings.wake_word)
+            self._wake.on_frame = self.feed.set_level
+
+    # -- UI feed --------------------------------------------------------------
+    def _on_mic_frame(self, level: float, vad_state: str) -> None:
+        self.feed.set_level(level)
+        if vad_state == "speech":
+            self.feed.publish(ui.LISTENING)
 
     # -- output ---------------------------------------------------------------
     def _say(self, text: str) -> None:
@@ -194,6 +205,7 @@ class ConversationSession:
         probe = self._probe_barge_in if self.settings.barge_in else None
         import numpy as np
 
+        self.feed.publish(ui.SPEAKING, text=text)
         samples, rate = tts.synthesise(text)
         if rate != self.speaker.rate:
             samples = _resample(np, samples, rate, self.speaker.rate)
@@ -201,6 +213,7 @@ class ConversationSession:
         self.mic.flush()  # whatever the mic heard during playback is not ours
         time.sleep(self.settings.echo_guard)
         self.mic.flush()
+        self.feed.publish(ui.LISTENING)
         return ok
 
     def _probe_barge_in(self) -> bool:
@@ -229,11 +242,13 @@ class ConversationSession:
             + " Ctrl-C to stop."
         )
         try:
-            while self.settings.max_turns is None or turns < self.settings.max_turns:
+            while (self.settings.max_turns is None or turns < self.settings.max_turns) and not self._stop:
                 if not self._conversation_open():
                     if not self._await_wake_word():
                         break
-                pcm = self.recorder.record(deadline=self._turn_deadline())
+                pcm = self.recorder.record(
+                    deadline=self._turn_deadline(), should_stop=lambda: self._stop
+                )
                 if pcm is None:
                     continue
                 if not pcm or len(pcm) < 1600:  # < 50 ms of audio
@@ -243,6 +258,14 @@ class ConversationSession:
         except KeyboardInterrupt:
             self._say("\nbye.")
         return 0
+
+    def _sleep(self) -> None:
+        """Mark the widget as waiting for the wake word again."""
+        self.feed.publish(ui.SLEEPING, text="", detail="")
+
+    def stop(self) -> None:
+        """Ask the loop to finish. Used when the widget window is closed."""
+        self._stop = True
 
     def _conversation_open(self) -> bool:
         if not self.settings.require_wake_word:
@@ -261,28 +284,36 @@ class ConversationSession:
     def _await_wake_word(self) -> bool:
         """Block until the phrase is heard. Returns False when interrupted."""
         assert self._wake is not None
-        while True:
+        self._sleep()
+        while not self._stop:
             if self._wake.wait(self.mic, timeout=1.0):
                 self._say("   (heard the wake word)")
+                self.feed.publish(ui.LISTENING, text="", detail="")
                 self.mic.flush()
                 self.expires_at = time.monotonic() + self.settings.session_timeout
                 return True
             # Timed out with nothing heard — loop and keep listening.
+        return False
 
     def _handle_turn(self, pcm: bytes, index: int) -> str:
         """Transcribe and answer one utterance; returns the transcript."""
+        self.feed.publish(ui.THINKING, text="")
         try:
             transcript = self.transcribe(pcm, index)
         except Exception as exc:  # noqa: BLE001 - one bad turn shouldn't end the session
             self._warn(f"   ! transcribe failed: {exc}")
+            self.feed.publish(ui.ERROR, detail=f"transcribe failed: {exc}")
             return ""
         if not transcript:
+            self.feed.publish(ui.LISTENING)
             return ""
         self._say(f"   you: {transcript}")
+        self.feed.publish(ui.THINKING, text=transcript)
         try:
             self.reply(transcript)
         except Exception as exc:  # noqa: BLE001 - keep the conversation alive
             self._warn(f"   ! reply failed: {exc}")
+            self.feed.publish(ui.ERROR, detail=f"reply failed: {exc}")
         # Refresh the open session: the person is still here and talking.
         self.expires_at = time.monotonic() + self.settings.session_timeout
         return transcript
@@ -306,8 +337,14 @@ def converse(
     mic: str | int | None = None,
     speaker: str | int | None = None,
     settings: ConversationSettings | None = None,
+    widget: bool = False,
 ) -> int:
-    """Build the devices and run one hands-free session."""
+    """Build the devices and run one hands-free session.
+
+    With `widget=True` the face window is driven from this process: the loop
+    runs on a worker thread and Tk keeps the main thread, which is what Tk
+    requires on Linux.
+    """
     settings = settings or ConversationSettings()
     try:
         mic_device = Microphone(device=mic)
@@ -315,6 +352,8 @@ def converse(
     except (AudioDeviceError, AudioError) as exc:
         print(f"error: {exc}", file=err or __import__("sys").stderr)
         return 2
+
+    feed = ui.StateFeed() if widget else ui.NullFeed()
 
     with mic_device, speaker_device:
         session = ConversationSession(
@@ -324,5 +363,43 @@ def converse(
             settings=settings,
             out=out,
             err=err,
+            feed=feed,
         )
-        return session.run()
+
+        if not widget:
+            return session.run()
+
+        import threading
+
+        result = {"code": 0}
+
+        def run_loop() -> None:
+            try:
+                result["code"] = session.run()
+            except Exception as exc:  # noqa: BLE001 - surface it in the window
+                feed.publish(ui.ERROR, detail=str(exc))
+                result["code"] = 1
+
+        worker = threading.Thread(target=run_loop, daemon=True)
+        worker.start()
+
+        import tkinter as tk
+
+        from .widget import Widget
+
+        def stop() -> None:
+            # Closing the window ends the session. Three things have to happen
+            # to make that prompt: the loop's stop flag, waking the mic stream
+            # (a thread parked in read() otherwise waits out its timeout), and
+            # letting the loop unwind before the audio devices are torn down.
+            session.stop()
+            mic_device.close()
+
+        window = Widget(feed, on_close=stop)
+        try:
+            window.root.mainloop()
+        except tk.TclError:
+            pass
+        session.stop()
+        worker.join(timeout=5.0)
+        return result["code"]

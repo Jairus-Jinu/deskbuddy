@@ -4,9 +4,8 @@ kokoro-onnx>=0.4.7,<1
 
 # Hands-free conversation: live audio, endpointing, wake word
 sounddevice>=0.5,<1
-openwakeword>=0.4,<1        # kept only for its Silero VAD model download path
-sherpa-onnx>=2,<3           # keyword spotter (custom wake words, no training)
-onnxruntime>=1.30,<2
+vosk>=0.3.45,<1             # wake word (restricted grammar = custom phrase)
+onnxruntime>=1.30,<2         # Silero VAD + Kokoro
 
 # Optional: Gemini fallback provider (DESKBUDDY_PROVIDER=gemini)
 google-genai>=2.25,<3

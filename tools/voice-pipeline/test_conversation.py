@@ -218,6 +218,51 @@ def test_turn_detector() -> None:
     check("too-short speech is discarded", "too_short" in states, str(states[-4:]))
 
 
+def test_state_feed() -> None:
+    print("state feed:")
+    from voice_pipeline import state as ui
+
+    feed = ui.StateFeed()
+    check("starts asleep", feed.read().state == ui.SLEEPING)
+    feed.publish(ui.LISTENING, text="hello")
+    check("publishes a state", feed.read().state == ui.LISTENING)
+    feed.set_level(0.4)
+    snapshot = feed.read()
+    check("level applies without wiping text", snapshot.level == 0.4 and snapshot.text == "hello",
+          f"{snapshot}")
+    feed.set_level(5.0)
+    check("level is clamped", feed.read().level == 1.0, str(feed.read().level))
+
+    null = ui.NullFeed()
+    null.publish(ui.ERROR, detail="x")
+    check("null feed is inert", null.read().state == ui.SLEEPING)
+
+    demo = ui.DemoFeed(hold=0.01)
+    import time
+
+    seen = set()
+    for _ in range(200):
+        seen.add(demo.read().state)
+        time.sleep(0.001)
+    check("demo cycles every state", seen == {ui.SLEEPING, ui.LISTENING, ui.THINKING,
+                                              ui.SPEAKING, ui.ERROR}, str(sorted(seen)))
+
+
+def test_meter() -> None:
+    print("mic meter:")
+    from voice_pipeline.vad import Meter
+    import numpy as np
+
+    meter = Meter()
+    quiet = (np.ones(512) * 300).astype(np.int16).tobytes()
+    loud = (np.ones(512) * 12000).astype(np.int16).tobytes()
+    for _ in range(40):
+        meter(quiet)
+    check("quiet sits near empty", meter(quiet) < 0.15, f"{meter(quiet):.2f}")
+    check("a loud frame lifts the ring", meter(loud) > 0.7, f"{meter(loud):.2f}")
+    check("output stays in range", 0.0 <= meter(loud) <= 1.0)
+
+
 def test_settings_defaults() -> None:
     print("settings:")
     settings = ConversationSettings()
@@ -231,6 +276,8 @@ def main() -> int:
         test_split_sentences,
         test_pcm_to_wav,
         test_settings_defaults,
+        test_state_feed,
+        test_meter,
         test_reply_streams_sentences,
         test_handle_turn,
         test_turn_detector,

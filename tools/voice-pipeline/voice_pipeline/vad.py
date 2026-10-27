@@ -21,6 +21,78 @@ CACHE_DIR = Path.home() / ".cache" / "deskbuddy"
 WINDOW = 512  # samples at 16 kHz
 CONTEXT = 64  # the model wants 64 samples of prior audio prepended
 
+def _rms(chunk: bytes) -> float:
+    """Root-mean-square of one frame of 16-bit PCM, without importing numpy."""
+    from array import array
+
+    samples = array("h")
+    samples.frombytes(chunk[: len(chunk) - (len(chunk) % 2)])
+    if not samples:
+        return 0.0
+    return (sum(value * value for value in samples) / len(samples)) ** 0.5
+
+
+class ClippingGuard:
+    """Detects a microphone that is turned up so high it distorts.
+
+    This laptop's mic sat at 81% gain and clipped at full scale on ordinary
+    room sound. Clipped speech is not just loud, it is *unintelligible*: every
+    peak is flattened to the same value, so the recognizer hears mush. The
+    symptom looks exactly like "the wake word does not work".
+
+    Watches the fraction of samples pinned near full scale; a short burst is
+    normal (a door slam), a sustained one means the input gain is too high.
+    """
+
+    def __init__(self, window: int = 100, threshold: float = 0.02) -> None:
+        from collections import deque
+
+        self._frames = deque(maxlen=window)
+        self._threshold = threshold
+
+    def __call__(self, chunk: bytes) -> bool:  # noqa: ANN001
+        from array import array
+
+        samples = array("h")
+        samples.frombytes(chunk[: len(chunk) - (len(chunk) % 2)])
+        if not samples:
+            return False
+        pinned = sum(1 for value in samples if abs(value) > 30_000) / len(samples)
+        self._frames.append(pinned)
+        if len(self._frames) < 20:
+            return False
+        return sum(self._frames) / len(self._frames) > self._threshold
+
+
+class Meter:
+    """Mic loudness as 0..1, measured *relative to the room*.
+
+    An absolute scale does not survive real rooms: this laptop's classroom sits
+    at RMS ~7000, while a quiet bedroom sits near 500, so any fixed ceiling is
+    either pinned at full or never moves. Like a VU meter, this tracks the
+    background level continuously and shows how far above it you are, so the
+    ring reacts to your voice in a lecture hall and in a silent room alike.
+
+    `calm` is the level that reads as empty; `loud` is roughly 20 dB above it.
+    """
+
+    def __init__(self, window: int = 40, percentile: float = 20.0) -> None:
+        from collections import deque
+
+        self._db = deque(maxlen=window)
+        self._percentile = percentile
+
+    def __call__(self, chunk: bytes) -> float:
+        import math
+
+        value = max(_rms(chunk), 1.0)
+        self._db.append(20.0 * math.log10(value))
+        if len(self._db) < 8:
+            return 0.0
+        floor = sorted(self._db)[int(len(self._db) * self._percentile / 100.0)]
+        # 20 dB of headroom above the room's floor fills the ring.
+        return max(0.0, min(1.0, (20.0 * math.log10(value) - floor) / 20.0))
+
 
 class VadError(RuntimeError):
     """Raised when the VAD model is unavailable or cannot run."""
@@ -203,20 +275,31 @@ class UtteranceRecorder:
         self._mic = mic
         self._detector = detector
         self._frame_timeout = frame_timeout
+        # Called with (0..1, state_str) for every frame read. Lets the UI follow
+        # the mic without the audio loop knowing a UI exists.
+        self.on_frame = None
+        self.meter = Meter()
 
-    def record(self, deadline: float | None = None, on_idle=None) -> bytes | None:  # noqa: ANN001
+    def record(self, deadline: float | None = None, on_idle=None,  # noqa: ANN001
+               should_stop=None) -> bytes | None:
         detector = self._detector
         detector.reset()
         started = time.monotonic()
         while True:
+            if should_stop is not None and should_stop():
+                return None
             if deadline is not None and time.monotonic() - started > deadline:
                 return None
             chunk = self._mic.read(timeout=self._frame_timeout)
             if chunk is None:
+                if getattr(self._mic, "closed", False):
+                    return None
                 if on_idle is not None:
                     on_idle()
                 continue
             state = detector.feed(chunk)
+            if self.on_frame is not None:
+                self.on_frame(self.meter(chunk), state)
             if state == "turn":
                 pcm = detector.pcm()
                 detector.reset()
