@@ -53,13 +53,19 @@ class GroqSpeechToText(SpeechToText):
         self._model = model
 
     def transcribe(self, wav_path: Path) -> str:
+        with open(wav_path, "rb") as audio:
+            return self.transcribe_audio(audio.read(), wav_path.name)
+
+    def transcribe_audio(self, wav_bytes: bytes, filename: str = "speech.wav") -> str:
+        """Transcribe in-memory WAV bytes (the conversation loop never writes one)."""
         try:
-            with open(wav_path, "rb") as audio:
-                result = self._client.audio.transcriptions.create(
-                    file=(wav_path.name, audio.read()),
-                    model=self._model,
-                    language="en",
-                )
+            result = self._client.audio.transcriptions.create(
+                file=(filename, wav_bytes),
+                model=self._model,
+                # Whisper detects the language itself; pinning "en" made it
+                # mangle the Hinglish the system prompt invites.
+                temperature=0.0,
+            )
         except Exception as exc:
             raise GroqError(f"transcribe failed ({self._model}): {exc}") from exc
         return (getattr(result, "text", "") or "").strip()
@@ -71,26 +77,44 @@ class GroqLanguageModel(LanguageModel):
         self._model = model
         self._system_prompt = system_prompt
 
-    def reply(self, user_text: str, history: list[Turn] | None = None) -> str:
+    def _messages(self, user_text: str, history: list[Turn] | None) -> list[dict[str, str]]:
         messages: list[dict[str, str]] = [{"role": "system", "content": self._system_prompt}]
         for turn in history or []:
             messages.append({"role": "user", "content": turn.user})
             messages.append({"role": "assistant", "content": turn.reply})
         messages.append({"role": "user", "content": user_text})
+        return messages
+
+    def reply(self, user_text: str, history: list[Turn] | None = None) -> str:
+        return "".join(self.stream(user_text, history))
+
+    def stream(self, user_text: str, history: list[Turn] | None = None):
+        """Yield the reply token by token as Groq produces it.
+
+        Tokens arrive in ~0.6 s; waiting for the full completion would add a
+        second of dead air before the first word is spoken.
+        """
         try:
             completion = self._client.chat.completions.create(
                 model=self._model,
-                messages=messages,
+                messages=self._messages(user_text, history),
                 temperature=0.7,
                 # gpt-oss reasons before answering and bills those tokens against
                 # max_tokens, so the budget is deliberately generous; `low` keeps
                 # the thinking short enough to stay conversational.
                 max_tokens=1200,
                 reasoning_effort="low",
+                stream=True,
             )
+            for chunk in completion:
+                choice = chunk.choices[0] if chunk.choices else None
+                if choice is None:
+                    continue
+                delta = getattr(choice.delta, "content", None)
+                if delta:
+                    yield delta
         except Exception as exc:
             raise GroqError(f"reply failed ({self._model}): {exc}") from exc
-        return (completion.choices[0].message.content or "").strip()
 
 
 class GroqTTS(TextToSpeech):
@@ -130,30 +154,54 @@ class GroqBrain:
         self._history: list[Turn] = []
 
     def _default_tts(self) -> TextToSpeech:
-        """Local Piper by default; Groq-hosted voice only if explicitly asked for."""
-        engine = os.environ.get("DESKBUDDY_TTS_ENGINE", "piper").strip().lower()
+        """Local Kokoro by default; Piper and Groq's own voice stay selectable."""
+        engine = os.environ.get("DESKBUDDY_TTS_ENGINE", "kokoro").strip().lower()
+        voice = os.environ.get("DESKBUDDY_TTS_VOICE")
         if engine == "groq":
             return GroqTTS(
                 client=self._client,
                 model=os.environ.get("DESKBUDDY_TTS_MODEL", DEFAULT_GROQ_TTS_MODEL),
-                voice=os.environ.get("DESKBUDDY_TTS_VOICE", DEFAULT_GROQ_TTS_VOICE),
+                voice=voice or DEFAULT_GROQ_TTS_VOICE,
             )
-        if engine != "piper":
-            raise GroqError(f"unknown TTS engine '{engine}' (use 'piper' or 'groq')")
+        if engine == "piper":
+            from .piper_tts import PiperTTS  # imported lazily: piper is optional
 
-        from .piper_tts import PiperTTS  # imported lazily: piper is optional
+            return PiperTTS(voice or "en_US-lessac-medium")
+        if engine == "kokoro":
+            from .kokoro_tts import KokoroTTS  # imported lazily: 325 MB model
 
-        return PiperTTS(os.environ.get("DESKBUDDY_TTS_VOICE", "en_US-lessac-medium"))
+            return KokoroTTS(voice or "af_heart")
+
+        raise GroqError(f"unknown TTS engine '{engine}' (use 'kokoro', 'piper' or 'groq')")
+
+    @property
+    def tts(self) -> TextToSpeech:
+        """The synthesizer itself, so the live loop can stream sentences."""
+        return self._tts
 
     def transcribe(self, wav_path: Path) -> str:
         return self._stt.transcribe(wav_path)
 
+    def transcribe_audio(self, wav_bytes: bytes, filename: str = "speech.wav") -> str:
+        return self._stt.transcribe_audio(wav_bytes, filename)
+
     def reply(self, user_text: str, history: list[Turn] | None = None) -> str:
         context = self._history if history is None else history
-        answer = self._llm.reply(user_text, context)
+        answer = "".join(self.stream(user_text, context))
         self._history.append(Turn(user=user_text, reply=answer))
         del self._history[:-MAX_TURNS_REMEMBERED]
         return answer
+
+    def stream(self, user_text: str, history: list[Turn] | None = None):
+        """Yield reply text incrementally; record the turn once it completes."""
+        context = self._history if history is None else history
+        collected: list[str] = []
+        for delta in self._llm.stream(user_text, context):
+            collected.append(delta)
+            yield delta
+        answer = "".join(collected).strip()
+        self._history.append(Turn(user=user_text, reply=answer))
+        del self._history[:-MAX_TURNS_REMEMBERED]
 
     def speak(self, text: str, out_path: Path) -> Path:
         return self._tts.speak(text, out_path)

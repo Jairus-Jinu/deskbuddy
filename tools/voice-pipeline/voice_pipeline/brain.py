@@ -121,6 +121,15 @@ class Brain:
             raise BrainError(f"reply failed ({self.config.llm_model}): {exc}") from exc
         return self._last_text(interaction).strip()
 
+    def stream(self, user_text: str, history: list[Turn] | None = None):
+        """Yield the reply in pieces.
+
+        The Interactions API has no token stream wired up here yet, so this
+        falls back to emitting the finished reply as one chunk — the loop still
+        works, it just loses the first-sentence head start Groq gets.
+        """
+        yield self.reply(user_text, history)
+
     def speak(self, text: str, out_path: Path) -> Path:
         """Text -> WAV file at 24 kHz, ready for the speaker."""
         try:
